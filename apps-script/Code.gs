@@ -9,9 +9,13 @@
  *  • Writes two kinds of captions:
  *      - Profile-specific (AI): personalised Seeking / Introduction / hashtags.
  *      - Generic (no AI): brand template filled from the row – works offline.
- *  • Everything structural (Key Highlights, About, Contact, base hashtags,
- *    the numbered 15-field ad) is assembled in code, so every row looks the
- *    same; the AI only writes the short personal sentences.
+ *  • Two fixed formats, assembled in code so every row looks the same:
+ *      - AD (column "Ads"): plain text, NO emojis, always the same 13 points.
+ *      - CAPTION (Instagram): emoji sections, Key Highlights, phone, hashtags.
+ *    The AI only writes the short personal sentences.
+ *  • One-click menu: Repair selected rows (keeps existing wording, fixes
+ *    errors, rebuilds both formats) and Generate empty rows.
+ *  • Consistent results: low temperature + a fixed seed per profile ID.
  *  • Every AI result is checked (gender pronouns, no hard-coded ages,
  *    no placeholders, length) and retried once, else falls back to generic.
  *
@@ -42,7 +46,7 @@ var DEFAULT_OPTS = {
   length: 'standard',            // short | standard | long
   emojis: true,
   hashtagCount: 18,
-  temperature: 0.8,
+  temperature: 0.3,               // low = consistent wording
   defaultGender: 'auto',         // auto | M | F
   cleanData: true,
   writeQA: true,
@@ -50,6 +54,7 @@ var DEFAULT_OPTS = {
   refFrom: 2,
   refTo: 101,
   variants: 3,
+  repairAI: false,
   sheetName: ''                  // blank = active sheet
 };
 
@@ -85,14 +90,18 @@ var FIELD_PATTERNS = {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Shaadi Bells AI')
-    .addItem('Open generator panel', 'showSidebar')
+    .addItem('🔑 Set / change secret API key', 'menuSetApiKey')
     .addSeparator()
-    .addItem('Generate for selected rows (saved settings)', 'menuGenerateSelected')
-    .addItem('Generic caption for selected rows (no AI)', 'menuGenericSelected')
-    .addItem('QA check selected rows', 'menuQASelected')
+    .addItem('🛠 Repair selected rows (quick, no AI)', 'menuRepairQuick')
+    .addItem('🛠 Repair selected rows with AI (fixes gender/voice too)', 'menuRepairAI')
     .addSeparator()
-    .addItem('Settings: set API key', 'menuSetApiKey')
-    .addItem('Refresh reference style (rows 2–101)', 'menuRefreshReference')
+    .addItem('✍ Generate empty rows (AI)', 'menuGenerateEmptyAI')
+    .addItem('✍ Generate empty rows (no AI, template)', 'menuGenerateEmptyGeneric')
+    .addItem('♻ Regenerate selected rows (AI, overwrite)', 'menuRegenerateSelected')
+    .addSeparator()
+    .addItem('✅ QA check selected rows', 'menuQASelected')
+    .addItem('⚙ Open settings panel', 'showSidebar')
+    .addItem('Reload reference style (rows 2–101)', 'menuRefreshReference')
     .addToUi();
 }
 
@@ -107,19 +116,63 @@ function showSidebar() {
 function menuSetApiKey() {
   var ui = SpreadsheetApp.getUi();
   var opts = getOptions();
-  var r = ui.prompt('API key for ' + opts.provider,
-    'Paste the key (stored only for your Google account, never in the script).',
+  var pr = ui.prompt('Secret API key – step 1 of 2',
+    'Which AI provider? Type: gemini, openai or anthropic\n(currently: ' + opts.provider +
+    (hasApiKey(opts.provider) ? ', key saved' : ', no key yet') + ')', ui.ButtonSet.OK_CANCEL);
+  if (pr.getSelectedButton() !== ui.Button.OK) return;
+  var provider = (pr.getResponseText().trim().toLowerCase() || opts.provider);
+  if (!DEFAULT_MODELS[provider]) { ui.alert('Unknown provider "' + provider + '". Use gemini, openai or anthropic.'); return; }
+  var r = ui.prompt('Secret API key – step 2 of 2',
+    'Paste the ' + provider + ' API key.\nIt is stored privately for your Google account (not in the script, not in the sheet).\nType DELETE to remove the saved key.',
     ui.ButtonSet.OK_CANCEL);
-  if (r.getSelectedButton() === ui.Button.OK && r.getResponseText().trim()) {
-    saveApiKey(opts.provider, r.getResponseText().trim());
-    ui.alert('Saved.');
-  }
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  var key = r.getResponseText().trim();
+  if (!key) return;
+  if (key === 'DELETE') { PropertiesService.getUserProperties().deleteProperty('sb_key_' + provider); ui.alert('Key removed.'); return; }
+  saveApiKey(provider, key);
+  opts.provider = provider; saveOptions(opts);
+  try { ui.alert('Saved ✓  ' + testConnection(opts)); }
+  catch (e) { ui.alert('Key saved, but the test call failed:\n' + (e.message || e)); }
 }
 
-function menuGenerateSelected() { menuRun_(getOptions()); }
-function menuGenericSelected() {
-  var o = getOptions(); o.captionType = 'generic'; o.generate = 'caption'; menuRun_(o);
+/** Runs a one-click job on the current options with a few overrides. */
+function runMenuJob_(over, mode) {
+  var o = getOptions();
+  for (var k in over) o[k] = over[k];
+  var started = Date.now();
+  var ctx = getContext_(o);
+  var rows = targetRows_(ctx);
+  if (!rows.length) { SpreadsheetApp.getActive().toast('No matching rows.', 'Shaadi Bells AI', 5); return; }
+  var done = 0, problems = 0;
+  for (var i = 0; i < rows.length; i++) {
+    if (Date.now() - started > 300000) break;            // Apps Script 6-min limit
+    try {
+      var msg = mode === 'repair' ? repairRow_(ctx, rows[i]) : processRow_(ctx, rows[i]);
+      if (/⚠|ERROR/.test(msg)) problems++;
+    } catch (e) {
+      if (/API key|error 40[13]/.test(String(e.message))) { SpreadsheetApp.getUi().alert(e.message); return; }
+      problems++;
+    }
+    done++;
+    if (done % 5 === 0) SpreadsheetApp.getActive().toast(done + ' / ' + rows.length + ' rows…', 'Shaadi Bells AI', 3);
+  }
+  SpreadsheetApp.flush();
+  SpreadsheetApp.getActive().toast(done + ' of ' + rows.length + ' rows done' + (problems ? ' · ' + problems + ' need a look (see QA Notes)' : '') +
+    (done < rows.length ? ' · time limit reached – click the same menu item again to continue' : ''), 'Shaadi Bells AI', 10);
 }
+
+function menuRepairQuick() { runMenuJob_({ rows: 'selected', repairAI: false }, 'repair'); }
+function menuRepairAI() { runMenuJob_({ rows: 'selected', repairAI: true }, 'repair'); }
+function menuGenerateEmptyAI() { runMenuJob_({ rows: 'empty', generate: 'both', captionType: 'specific', overwrite: false }); }
+function menuGenerateEmptyGeneric() { runMenuJob_({ rows: 'empty', generate: 'both', captionType: 'generic', overwrite: false }); }
+function menuRegenerateSelected() {
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('Regenerate selected rows?', 'This replaces the existing Ads and Instagram text in the selected rows.', ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  runMenuJob_({ rows: 'selected', generate: 'both', captionType: 'specific', overwrite: true });
+}
+function menuGenerateSelected() { runMenuJob_({ rows: 'selected' }); }
+function menuGenericSelected() { runMenuJob_({ rows: 'selected', captionType: 'generic' }); }
+
 function menuQASelected() {
   var ctx = getContext_(getOptions());
   var rows = selectedRows_(ctx);
@@ -133,23 +186,10 @@ function menuQASelected() {
   SpreadsheetApp.getActive().toast(n + ' rows checked', 'Shaadi Bells AI');
 }
 function menuRefreshReference() {
-  CacheService.getDocumentCache().remove('sb_ref_v2');
+  CacheService.getDocumentCache().remove('sb_ref_v3');
   var ctx = getContext_(getOptions());
   var refs = getReferences_(ctx);
   SpreadsheetApp.getActive().toast(refs.length + ' clean reference examples loaded', 'Shaadi Bells AI');
-}
-
-function menuRun_(opts) {
-  var started = Date.now();
-  var ctx = getContext_(opts);
-  var rows = targetRows_(ctx);
-  var done = 0;
-  for (var i = 0; i < rows.length; i++) {
-    if (Date.now() - started > 300000) break;     // stay under the 6-min limit
-    processRow_(ctx, rows[i]); done++;
-  }
-  SpreadsheetApp.getActive().toast(done + ' of ' + rows.length + ' rows done' +
-    (done < rows.length ? ' – run again (or use the panel) to continue' : ''), 'Shaadi Bells AI', 8);
 }
 
 // ─────────────────────────── Options & API key ─────────────────────────────
@@ -201,7 +241,7 @@ function mergeOpts_(o) {
   base.hashtagCount = Math.max(8, Math.min(30, Number(base.hashtagCount) || 18));
   base.variants = Math.max(1, Math.min(3, Number(base.variants) || 3));
   base.temperature = Math.max(0, Math.min(1.2, Number(base.temperature)));
-  if (isNaN(base.temperature)) base.temperature = 0.8;
+  if (isNaN(base.temperature)) base.temperature = 0.3;
   return base;
 }
 
@@ -324,8 +364,10 @@ var SPELLING_FIXES = [
 
 function fixSpelling_(s) {
   s = String(s || '');
-  SPELLING_FIXES.forEach(function (f) { s = s.replace(f[0], f[1]); });
-  return s.trim();
+  SPELLING_FIXES.forEach(function (f) {
+    s = s.replace(f[0], function (w) { return /^[a-z]/.test(w) && /^[A-Z]/.test(f[1]) && /\w/.test(w) ? f[1].toLowerCase() : f[1]; });
+  });
+  return s.replace(/\s+,/g, ',').trim();
 }
 
 function normalizeHeight_(h) {
@@ -487,7 +529,10 @@ function buildHashtags_(p, aiTags, limit) {
   professionTags_(p).forEach(add);
   BRAND.premiumTags.forEach(add);
   // AI tags are filtered so they can't contradict the profile's community/place.
-  (aiTags || []).filter(function (t) { return tagFitsProfile_(t, p); }).slice(0, 6).forEach(add);
+  (aiTags || []).filter(function (t) {
+    var k = ('#' + String(t).replace(/^#/, '')).toLowerCase();
+    return !seen[k] && tagFitsProfile_(t, p);
+  }).slice(0, 6).forEach(add);
   add(camelTag_(p.college));
   add(camelTag_(p.schooling));
   var hob = String(p.hobbies || '').split(/,|\//)[0];
@@ -500,6 +545,10 @@ var PLACE_WORDS = /(delhi|mumbai|gurgaon|gurugram|noida|chandigarh|dubai|canada|
 
 function tagFitsProfile_(tag, p) {
   var t = String(tag || '');
+  if (t.replace(/^#/, '').length > 28) return false;
+  if (/nri|dubai|canada|uk|usa|abroad|overseas/i.test(t) && placeTags_(p.place).indexOf('#NRIMatrimony') < 0) return false;
+  if (/divorc|second ?marriage|remarriage/i.test(t) && !/divorc/i.test(p.rawId + ' ' + p.section)) return false;
+  if (/millionaire|billionaire|rich/i.test(t)) return false;
   var cm = t.match(COMMUNITY_WORDS);
   if (cm) {
     var want = (p.community + ' ' + p.caste).toLowerCase();
@@ -582,6 +631,10 @@ function jobPhrase_(occ, verbS) {
   if (/^businessman$/i.test(occ)) return (verbS ? 'is' : 'am') + ' an established businessman';
   if (/^(entrepreneur|startup founder|founder)/i.test(occ)) return (verbS ? 'is' : 'am') + ' ' + article_(occ) + occ;
   var main = occ.split(/\s+\/\s+/)[0];
+  var words = main.replace(/\([^)]*\)/g, '').split(/[^A-Za-z]+/).filter(String);
+  if (BUSINESS_NOUN.test(main) && !words.some(function (w) { return PERSON_WORD.test(w); })) {
+    return (verbS ? 'is' : 'am') + ' associated with ' + article_(main) + softLower_(main);
+  }
   return (verbS ? 'works' : 'work') + ' as ' + article_(main) + main;
 }
 
@@ -628,8 +681,6 @@ function genericParts_(p, voice) {
     seeking: seekingOpts[hashIdx_(p.id + 's', seekingOpts.length)],
     introduction: intro.replace(/\s+/g, ' ').trim(),
     background: background,
-    values: 'Values integrity, family and personal growth' + (hobbies ? ', with a love for ' + hobbies : '') + '.',
-    aspiration: 'Aspires to balance a fulfilling career with a warm family life built on mutual respect.',
     hashtags: []
   };
 }
@@ -658,34 +709,36 @@ function buildCaption_(p, parts, opts) {
   return lines.join('\n');
 }
 
+var EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{20E3}]/gu;
+
+function stripEmoji_(s) { return String(s || '').replace(EMOJI_RE, '').replace(/[ \t]{2,}/g, ' ').trim(); }
+
+/** The printed ad: plain text, no emojis, always exactly these 13 points. */
 function buildAds_(p, parts) {
   var edu = p.education && p.college && p.education.indexOf(p.college) < 0 ? p.education + ', ' + p.college : (p.education || p.college);
-  return [
+  var lines = [
     '1. Registration ID: ' + p.id,
     '2. Date of Birth: ' + p.dob,
-    '3. Place of Residence: ' + p.place,
+    '3. Residence: ' + p.place,
     '4. Height: ' + p.height,
     '5. Caste: ' + p.caste,
     '6. Education: ' + edu,
     '7. Schooling: ' + p.schooling,
     '8. College / University: ' + p.college,
     '9. Occupation / Job: ' + p.occupation,
-    '10. Background (Family / Area):',
-    parts.background,
-    '',
+    '10. Background (Family / Area): ' + String(parts.background || '').replace(/\s+/g, ' ').trim(),
     '11. Father: ' + p.father,
     '12. Mother: ' + p.mother,
-    '13. Hobbies / Interests: ' + p.hobbies,
-    '14. Values: ' + parts.values,
-    '15. Aspiration: ' + parts.aspiration
-  ].join('\n');
+    '13. Hobbies / Interests: ' + p.hobbies
+  ];
+  return lines.map(stripEmoji_).join('\n');
 }
 
 // ────────────────────────── Reference examples ─────────────────────────────
 /** Clean examples from the reference rows, cached for 6 h. */
 function getReferences_(ctx) {
   var cache = CacheService.getDocumentCache();
-  var key = 'sb_ref_v2';
+  var key = 'sb_ref_v3';
   var hit = cache.get(key);
   if (hit) { try { return JSON.parse(hit); } catch (e) {} }
   var o = ctx.opts, sh = ctx.sheet;
@@ -703,14 +756,12 @@ function getReferences_(ctx) {
     if ((cap.match(/Seeking/g) || []).length !== 1) return;
     var seek = (cap.match(/Seeking\s*\n([\s\S]*?)\n[^\n]*Introduction/) || [])[1];
     var intro = (cap.match(/Introduction\s*\n([\s\S]*?)\n[^\n]*Key Highlights/) || [])[1];
-    var bg = (ads.match(/10\. Background[^\n]*\n([\s\S]*?)\n\s*11\./) || [])[1];
-    var val = (ads.match(/14\. Values:\s*([^\n]+)/) || [])[1];
-    var asp = (ads.match(/15\. Aspiration:\s*([^\n]+)/) || [])[1];
-    if (!seek || !intro || !bg) return;
+    var bg = extractBackground_(ads);
+    if (!seek || !intro || !bg || bg.length < 40) return;
     var tags = (cap.match(/#\w+/g) || []).slice(4);
     var section = ctx.sections[from + i - 1] || '';
-    refs.push({ seeking: seek.trim(), introduction: intro.trim(), background: bg.trim(), values: (val || '').trim(),
-      aspiration: (asp || '').trim(), tags: tags.slice(0, 8), section: section,
+    refs.push({ seeking: seek.trim(), introduction: intro.trim(), background: bg.trim(),
+      tags: tags.slice(0, 8), section: section,
       place: ctx.cols.place ? v[ctx.cols.place - 1] : '' });
   });
   try { cache.put(key, JSON.stringify(refs).slice(0, 99000), 21600); } catch (e) {}
@@ -743,9 +794,7 @@ var STYLE_GUIDE = [
   '- Plain hyphens are fine ("close-knit", "well-educated"). No markdown, no emojis inside the text, no hashtags inside sentences.',
   '- seeking: 1–2 sentences describing the partner sought (starts like "Looking for…" / "Seeking…").',
   '- introduction: family surname + city, parents\' professions, education, profession, one personal touch from hobbies.',
-  '- background: 2–3 sentences for the printed ad (family, upbringing, path to career).',
-  '- values: one sentence starting with "Values…".',
-  '- aspiration: one sentence starting with "Aspires to…".',
+  '- background: 2–3 plain sentences for the printed ad (family, upbringing, path to career). No emojis.',
   '- hashtags: 4–6 specific CamelCase hashtags about profession, institutions, hobbies or city. No community/religion tags that are not in the profile. No generic tags like #love.'
 ].join('\n');
 
@@ -774,13 +823,12 @@ function profileForPrompt_(p) {
 function buildPrompt_(p, refs, opts, n, extra) {
   var ex = refs.map(function (r, i) {
     return 'Example ' + (i + 1) + ':\n' + JSON.stringify({
-      seeking: r.seeking, introduction: r.introduction, background: r.background,
-      values: r.values, aspiration: r.aspiration, hashtags: r.tags.slice(0, 5)
+      seeking: r.seeking, introduction: r.introduction, background: r.background, hashtags: r.tags.slice(0, 5)
     });
   }).join('\n\n');
   var schema = n > 1
-    ? 'Return JSON: {"options":[{"angle":"<2–4 word label>","seeking":"","introduction":"","background":"","values":"","aspiration":"","hashtags":["#..."]}, …]} with exactly ' + n + ' DIFFERENT options (different angle: e.g. family values, career, lifestyle/hobbies).'
-    : 'Return JSON: {"seeking":"","introduction":"","background":"","values":"","aspiration":"","hashtags":["#..."]}';
+    ? 'Return JSON: {"options":[{"angle":"<2–4 word label>","seeking":"","introduction":"","background":"","hashtags":["#..."]}, …]} with exactly ' + n + ' DIFFERENT options (different angle: e.g. family values, career, lifestyle/hobbies).'
+    : 'Return JSON: {"seeking":"","introduction":"","background":"","hashtags":["#..."]}';
   return [
     'REFERENCE EXAMPLES (style only – voice may differ from what is required):', ex || '(none)',
     '', 'PROFILE:', JSON.stringify(profileForPrompt_(p), null, 1),
@@ -792,16 +840,16 @@ function buildPrompt_(p, refs, opts, n, extra) {
 
 function validateParts_(parts, p, voice) {
   var issues = [];
-  ['seeking', 'introduction', 'background', 'values', 'aspiration'].forEach(function (k) {
+  ['seeking', 'introduction', 'background'].forEach(function (k) {
     if (!parts || !parts[k] || String(parts[k]).trim().length < 15) issues.push(k + ' is missing/too short');
   });
   if (issues.length) return issues;
-  var text = [parts.introduction, parts.background, parts.values, parts.aspiration].join(' ');
+  var text = [parts.introduction, parts.background].join(' ');
   var wrong = pronounMismatch_(text, p.gender);
   if (wrong) issues.push('uses ' + wrong + ' pronouns but the candidate is ' + (p.gender === 'F' ? 'female' : 'male'));
   var all = text + ' ' + parts.seeking;
   if (/\b\d{2}\s*(years?|yrs)\s*old\b|\bage[:\s]*\d{2}\b|\baged\s*\d{2}\b/i.test(all)) issues.push('states an age');
-  if (/customhashtag|lorem|\[|\]|\{|\}|N\/A|—/i.test(all)) issues.push('contains placeholders/brackets');
+  if (/customhashtag|lorem|\[|\]|\{|\}|\bN\/A\b|:\s*—/i.test(all)) issues.push('contains placeholders/brackets');
   if (voice === 'third' && /\b(I|my|our son|our daughter)\b/.test(parts.introduction)) issues.push('must be third person');
   if (voice === 'first' && /\b(he|she) (is|was|works|belongs)\b/i.test(parts.introduction)) issues.push('must be first person');
   if (/\+?91\s?\d{5}|shaadi bells/i.test(all)) issues.push('repeats phone/brand');
@@ -809,7 +857,7 @@ function validateParts_(parts, p, voice) {
 }
 
 // ─────────────────────────────── LLM call ──────────────────────────────────
-function callLLM_(opts, system, user, temperature) {
+function callLLM_(opts, system, user, temperature, seed) {
   var provider = opts.provider || 'gemini';
   var key = PropertiesService.getUserProperties().getProperty('sb_key_' + provider);
   if (!key) throw new Error('No API key saved for ' + provider + '. Add it in the panel (Connection) or menu ▸ Settings.');
@@ -822,14 +870,15 @@ function callLLM_(opts, system, user, temperature) {
       payload: {
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: user }] }],
-        generationConfig: { temperature: temperature, responseMimeType: 'application/json' }
+        generationConfig: seed == null ? { temperature: temperature, responseMimeType: 'application/json' }
+          : { temperature: temperature, responseMimeType: 'application/json', seed: seed }
       }
     };
   } else if (provider === 'openai') {
     req = {
       url: 'https://api.openai.com/v1/chat/completions',
       headers: { Authorization: 'Bearer ' + key },
-      payload: { model: model, temperature: temperature, response_format: { type: 'json_object' },
+      payload: { model: model, temperature: temperature, response_format: { type: 'json_object' }, seed: seed == null ? undefined : seed,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }
     };
   } else {
@@ -859,6 +908,9 @@ function callLLM_(opts, system, user, temperature) {
   return parseJsonLoose_(text);
 }
 
+/** Same profile ID → same seed → same wording on re-runs. */
+function seedFor_(id) { return hashIdx_(String(id), 2147483); }
+
 function parseJsonLoose_(text) {
   text = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
   try { return JSON.parse(text); } catch (e) {}
@@ -873,7 +925,7 @@ function aiParts_(ctx, p) {
   var issues = [];
   for (var attempt = 0; attempt < 2; attempt++) {
     try {
-      var out = callLLM_(ctx.opts, STYLE_GUIDE, buildPrompt_(p, refs, ctx.opts, 1, issues.join('; ')), ctx.opts.temperature);
+      var out = callLLM_(ctx.opts, STYLE_GUIDE, buildPrompt_(p, refs, ctx.opts, 1, issues.join('; ')), ctx.opts.temperature + attempt * 0.2, seedFor_(p.id));
       issues = validateParts_(out, p, ctx.opts.voice);
       if (!issues.length) return { parts: tidyParts_(out), source: 'ai', issues: [] };
     } catch (e) {
@@ -886,8 +938,7 @@ function aiParts_(ctx, p) {
 
 function tidyParts_(o) {
   var t = function (s) { return String(s || '').replace(/\s+/g, ' ').replace(/\s([,.])/g, '$1').trim(); };
-  return { seeking: t(o.seeking), introduction: t(o.introduction), background: t(o.background),
-    values: t(o.values), aspiration: t(o.aspiration),
+  return { seeking: t(o.seeking), introduction: t(o.introduction), background: stripEmoji_(t(o.background)),
     hashtags: Array.isArray(o.hashtags) ? o.hashtags : [] , angle: o.angle || '' };
 }
 
@@ -947,12 +998,17 @@ function targetRows_(ctx) {
   if (o.rows === 'range') { from = Math.max(2, Number(o.rangeFrom) || 2); to = Math.min(ctx.lastRow, Number(o.rangeTo) || ctx.lastRow); }
   var sh = ctx.sheet;
   var ids = sh.getRange(from, ctx.cols.id, to - from + 1, 1).getDisplayValues();
-  var capCol = o.generate === 'ads' ? ctx.cols.ads : ctx.cols.caption;
-  var caps = sh.getRange(from, capCol, to - from + 1, 1).getDisplayValues();
+  var n = to - from + 1;
+  var caps = sh.getRange(from, ctx.cols.caption, n, 1).getDisplayValues();
+  var ads = sh.getRange(from, ctx.cols.ads, n, 1).getDisplayValues();
   var out = [];
   for (var i = 0; i < ids.length; i++) {
     if (!/SM\d+/i.test(ids[i][0])) continue;
-    if (o.rows === 'empty' && String(caps[i][0]).trim()) continue;
+    if (o.rows === 'empty') {
+      var capEmpty = !String(caps[i][0]).trim(), adEmpty = !String(ads[i][0]).trim();
+      var need = o.generate === 'ads' ? adEmpty : o.generate === 'caption' ? capEmpty : (capEmpty || adEmpty);
+      if (!need) continue;
+    }
     out.push(from + i);
   }
   return out;
@@ -1015,6 +1071,207 @@ function applyOption(row, caption, ads, which) {
 
 function refreshReference(opts) {
   saveOptions(opts);
-  CacheService.getDocumentCache().remove('sb_ref_v2');
+  CacheService.getDocumentCache().remove('sb_ref_v3');
   return getReferences_(getContext_(opts)).length;
+}
+
+// ───────────────────────────────── REPAIR ──────────────────────────────────
+// Keeps the row's existing wording where it is good, fixes the errors, and
+// rebuilds the 13-point ad (no emojis) + the emoji caption in the house format.
+
+var HYPHEN_FIXES = {
+  closeknit: 'close-knit', likeminded: 'like-minded', welleducated: 'well-educated', forwardthinking: 'forward-thinking',
+  warmhearted: 'warm-hearted', kindhearted: 'kind-hearted', familyoriented: 'family-oriented', wellrounded: 'well-rounded',
+  openminded: 'open-minded', wellsettled: 'well-settled', downtoearth: 'down-to-earth', funloving: 'fun-loving',
+  softspoken: 'soft-spoken', wellestablished: 'well-established', wellmannered: 'well-mannered', goodnatured: 'good-natured',
+  highlyeducated: 'highly educated', selfmade: 'self-made', worldclass: 'world-class', godfearing: 'God-fearing',
+  careeroriented: 'career-oriented', valuedriven: 'value-driven', modernday: 'modern-day', wellread: 'well-read'
+};
+var GENERIC_SEEKING = /^seeking a compatible life partner for a respectful and fulfilling future\.?$/i;
+
+/** Background text of an existing ad (works for the 13- and 15-point layouts). */
+function extractBackground_(ads) {
+  var m = String(ads || '').match(/10\.\s*Background[^:\n]*:\s*([\s\S]*?)\n\s*11\./);
+  if (!m) return '';
+  var bg = m[1].replace(/\s+/g, ' ').trim();
+  if (/^(father:.*mother:.*|—|-|n\/a)?$/i.test(bg)) return '';       // "Father: X. Mother: Y." is not a background
+  return bg;
+}
+
+/** Splits an existing caption into its personal parts. Returns null if it can't. */
+function extractCaptionParts_(cap) {
+  var lines = String(cap || '').split(/\r?\n/);
+  var HEAD = /^\s*[^\w\s#]*\s*(Seeking|Introduction|Key Highlights)\s*:?\s*$/i;
+  var TAIL = /^\s*[^\w\s#]*\s*(About|Contact)\s+Shaadi/i;
+  var cur = '', buckets = { seeking: [], introduction: [] }, seekHeads = 0;
+  lines.forEach(function (ln) {
+    var h = ln.match(HEAD);
+    if (h) { cur = h[1].toLowerCase(); if (cur === 'seeking') seekHeads++; return; }
+    if (TAIL.test(ln)) { cur = 'tail'; return; }
+    if (!ln.trim()) return;
+    if (cur === 'seeking') buckets.seeking.push(ln.trim());
+    else if (cur === 'introduction') buckets.introduction.push(ln.trim());
+  });
+  var seek = buckets.seeking.filter(function (l) { return !/^#/.test(l); });
+  if (seek.length > 1) seek = seek.filter(function (l) { return !GENERIC_SEEKING.test(l); });
+  var out = {
+    seeking: seek.join(' '),
+    introduction: buckets.introduction.filter(function (l) { return !/^#/.test(l); }).join(' '),
+    hashtags: String(cap || '').match(/#[A-Za-z0-9_]+/g) || [],
+    duplicateSeeking: seekHeads > 1
+  };
+  return out.introduction ? out : null;
+}
+
+function keepCase_(orig, repl) {
+  if (orig === orig.toUpperCase() && orig.length > 1) return repl.toUpperCase();
+  if (orig.charAt(0) === orig.charAt(0).toUpperCase()) return repl.charAt(0).toUpperCase() + repl.slice(1);
+  return repl;
+}
+
+/** Cleans a sentence block; pushes what it fixed into `fixed`. */
+function cleanText_(s, fixed) {
+  var t = String(s || ''), before;
+  before = t; t = stripEmoji_(t); if (t !== before) fixed.add('emojis removed from text');
+  before = t; t = t.replace(/\s#[A-Za-z0-9_]+/g, ''); if (t !== before) fixed.add('hashtags removed from sentences');
+  before = t;
+  t = t.replace(/\b(a|an)\s+(\w+\s+)?\d{2}[- ]years?[- ]old\s+(?=(from|in|who|with|based)\b)/gi,
+                function (m, art, adj) { return keepCase_(art, 'a') + ' ' + (adj || '') + 'young professional '; })
+       .replace(/\b(a|an)\s+(\w+\s+)?\d{2}[- ]years?[- ]old\s+/gi, function (m, art, adj, off, str) {
+         var next = adj || str.slice(off + m.length);
+         return keepCase_(art, /^[aeiou]/i.test(next) ? 'an' : 'a') + ' ' + (adj || '');
+       })
+       .replace(/,?\s*\b\d{2}[- ]years?[- ]old\b/gi, '')
+       .replace(/,?\s*\(?\b(age|aged)[:\s]*\d{2}\)?(\s*years?( old)?)?/gi, '')
+       .replace(/,?\s*\b\d{2}\s*(years?|yrs)\s*(old|of age)\b/gi, '');
+  if (t !== before) fixed.add('hard-coded age removed');
+  before = t;
+  t = t.replace(/\b[A-Za-z]+\b/g, function (w) { var f = HYPHEN_FIXES[w.toLowerCase()]; return f ? keepCase_(w, f) : w; });
+  if (t !== before) fixed.add('hyphens restored');
+  before = t; t = fixSpelling_(t); if (t !== before) fixed.add('spellings fixed');
+  t = t.replace(/\s+/g, ' ').replace(/\s+([,.!?])/g, '$1').replace(/([.!?])\1+/g, '$1').replace(/\.\s*,/g, '.').trim();
+  if (t && !/[.!?]$/.test(t)) t += '.';
+  return t;
+}
+
+/** Rewrites the CANDIDATE's pronouns to the right gender. */
+function swapPronouns_(s, toGender) {
+  var map = toGender === 'F'
+    ? [[/\bhe\b/gi, 'she'], [/\bhimself\b/gi, 'herself'], [/\bhim\b/gi, 'her'], [/\bhis\b/gi, 'her'], [/\bson\b/gi, 'daughter'],
+       [/\bgroom\b/gi, 'bride'], [/\balumnus\b/gi, 'alumna'], [/\bbusinessman\b/gi, 'businesswoman'], [/\bboy\b/gi, 'girl']]
+    : [[/\bshe\b/gi, 'he'], [/\bherself\b/gi, 'himself'], [/\bhers\b/gi, 'his'], [/\bdaughter\b/gi, 'son'], [/\bbride\b/gi, 'groom'],
+       [/\balumna\b/gi, 'alumnus'], [/\bbusinesswoman\b/gi, 'businessman'], [/\bgirl\b/gi, 'boy']];
+  var t = String(s || '');
+  map.forEach(function (m) { t = t.replace(m[0], function (w) { return keepCase_(w, m[1]); }); });
+  if (toGender === 'M') {   // "her" → "his" before a noun, otherwise "him"
+    t = t.replace(/\bher\b(\s+)(\w+)?/gi, function (w, sp, next) {
+      var obj = !next || /^(and|to|for|with|in|on|at|as|by|from|of|is|was|the|a|an)$/i.test(next);
+      return keepCase_(w.slice(0, 3), obj ? 'him' : 'his') + sp + (next || '');
+    });
+  }
+  return t;
+}
+
+/** Repairs one row. Returns a log line. */
+function repairRow_(ctx, row) {
+  var p = readProfile_(ctx, row);
+  if (!p) return 'Row ' + row + ': skipped (not a profile row)';
+  var o = ctx.opts, qa = qaCheck_(p, ctx);
+  if (!p.education && !p.occupation && !p.place) {
+    if (o.writeQA) writeCell_(ctx, row, 'qa', 'Not repaired – profile data is empty. Fill the row, then use Generate.', true);
+    return p.id + ': skipped (empty profile) ⚠';
+  }
+  var fixed = { list: [], add: function (x) { if (this.list.indexOf(x) < 0) this.list.push(x); } };
+  var old = extractCaptionParts_(p.existingCaption) || { seeking: '', introduction: '', hashtags: [] };
+  var gen = genericParts_(p, o.voice);
+  if (old.duplicateSeeking) fixed.add('duplicate "Seeking" merged');
+  if (/customhashtag|placeofresidence/i.test(p.existingCaption)) fixed.add('placeholder hashtags removed');
+  if (/^\s*1[45]\./m.test(p.existingAds)) fixed.add('ad reduced to 13 points');
+
+  var parts = {
+    seeking: cleanText_(old.seeking, fixed),
+    introduction: cleanText_(old.introduction, fixed),
+    background: cleanText_(extractBackground_(p.existingAds), fixed),
+    hashtags: old.hashtags
+  };
+  if (!parts.seeking || parts.seeking.length < 15) { parts.seeking = gen.seeking; if (p.existingCaption) fixed.add('Seeking written'); }
+  if (!parts.introduction || parts.introduction.length < 30) { parts.introduction = gen.introduction; fixed.add('Introduction written from row data'); }
+  if (!parts.background || parts.background.length < 30) { parts.background = gen.background; fixed.add('ad background written from row data'); }
+
+  // Wrong gender → swap the candidate's pronouns everywhere they describe the candidate.
+  var wrongChild = p.gender === 'F' ? /\bour son\b/gi : /\bour daughter\b/gi;
+  var whole = parts.introduction + ' ' + parts.background + ' ' + (parts.seeking.match(wrongChild) || []).join(' ');
+  var wrongIntro = pronounMismatch_(parts.introduction + ' ' + (parts.seeking.match(wrongChild) || []).join(' '), p.gender);
+  if (pronounMismatch_(whole, p.gender) || wrongIntro) {
+    parts.introduction = swapPronouns_(parts.introduction, p.gender);
+    parts.background = swapPronouns_(parts.background, p.gender);
+    parts.seeking = parts.seeking.replace(wrongChild, function (w) { return keepCase_(w, p.gender === 'F' ? 'our daughter' : 'our son'); });
+    fixed.add('pronouns corrected to ' + (p.gender === 'F' ? 'female' : 'male') + ' – VERIFY gender (text said otherwise)');
+  }
+
+  var source = 'quick';
+  if (o.repairAI) {
+    var ai = aiRepair_(ctx, p, parts);
+    if (ai.parts) { parts = ai.parts; source = 'AI'; } else fixed.add('AI repair failed – quick repair used (' + ai.error.slice(0, 60) + ')');
+  }
+
+  var leftover = validateParts_(parts, p, o.repairAI ? o.voice : 'any');
+  var cap = buildCaption_(p, parts, o);
+  var ad = buildAds_(p, parts);
+  writeCell_(ctx, row, 'caption', cap, true);
+  writeCell_(ctx, row, 'ads', ad, true);
+  if (o.writeGender) writeCell_(ctx, row, 'gender', p.gender === 'F' ? 'Female' : 'Male', true);
+  var dataNotes = qa.filter(function (q) { return !/^Existing caption|^Caption has|^Placeholder hashtag/.test(q); });
+  var note = ['Repaired (' + source + '): ' + (fixed.list.join(', ') || 'format rebuilt')].concat(dataNotes)
+    .concat(leftover.length ? ['CHECK: ' + leftover.join(', ')] : []).join('; ');
+  if (o.writeQA) writeCell_(ctx, row, 'qa', note, true);
+  return p.id + ' (row ' + row + '): repaired [' + source + ']' + (leftover.length ? ' ⚠ ' + leftover[0] : '');
+}
+
+/** AI rewrite that keeps facts + wording, fixes gender/voice/age/grammar. */
+function aiRepair_(ctx, p, parts) {
+  var refs = pickReferences_(getReferences_(ctx), p, 2);
+  var user = [
+    'REPAIR this existing profile text. Keep every correct fact and as much of the original wording as possible.',
+    'Fix: wrong gender/pronouns, wrong voice, any stated age, facts that contradict the PROFILE, grammar, missing hyphens.',
+    'Do not add new facts.',
+    '', 'EXISTING TEXT:', JSON.stringify({ seeking: parts.seeking, introduction: parts.introduction, background: parts.background }),
+    '', buildPrompt_(p, refs, ctx.opts, 1, '')
+  ].join('\n');
+  var err = '';
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      var out = callLLM_(ctx.opts, STYLE_GUIDE, user + (err ? '\nFIX: ' + err : ''), 0.2 + attempt * 0.2, seedFor_(p.id));
+      var issues = validateParts_(out, p, ctx.opts.voice);
+      if (!issues.length) {
+        var t = tidyParts_(out);
+        if (!t.hashtags.length) t.hashtags = parts.hashtags;
+        else t.hashtags = t.hashtags.concat(parts.hashtags);
+        return { parts: t };
+      }
+      err = issues.join('; ');
+    } catch (e) {
+      err = String(e.message || e);
+      if (/API key|error 40[13]/.test(err)) throw e;
+    }
+  }
+  return { parts: null, error: err };
+}
+
+// Sidebar endpoint for repair batches.
+function runRepairBatch(opts, rows, useAI) {
+  opts = opts || {}; opts.repairAI = !!useAI;
+  var ctx = getContext_(opts);
+  var log = [];
+  rows.forEach(function (r) {
+    try { log.push(repairRow_(ctx, r)); }
+    catch (e) { log.push('Row ' + r + ': ERROR ' + (e.message || e)); if (/API key|error 40[13]/.test(String(e.message))) throw e; }
+  });
+  SpreadsheetApp.flush();
+  return log;
+}
+
+function planSelected(opts) {
+  var ctx = getContext_(opts);
+  return { rows: selectedRows_(ctx) };
 }

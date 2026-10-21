@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<style>
+  :root { --brand:#9b1c4a; --line:#e3e3e3; --muted:#666; --ok:#1e7b34; --warn:#b26a00; }
+  * { box-sizing:border-box; }
+  body { font-family: Arial, sans-serif; font-size:13px; margin:0; padding:12px; color:#222; }
+  h2 { font-size:15px; margin:0 0 8px; color:var(--brand); }
+  details { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:10px; }
+  summary { font-weight:bold; cursor:pointer; }
+  label { display:block; margin:8px 0 3px; color:#333; }
+  select, input[type=text], input[type=password], input[type=number] { width:100%; padding:6px; border:1px solid #ccc; border-radius:5px; font-size:13px; }
+  .row2 { display:flex; gap:8px; } .row2 > div { flex:1; }
+  .chk { display:flex; align-items:center; gap:6px; margin:6px 0; } .chk input { margin:0; }
+  .hint { color:var(--muted); font-size:11px; margin-top:2px; }
+  button { padding:8px 10px; border-radius:6px; border:1px solid #ccc; background:#fff; cursor:pointer; font-size:13px; }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:bold; }
+  button:disabled { opacity:.5; cursor:default; }
+  .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .btns button { flex:1; }
+  #status { margin-top:10px; font-size:12px; }
+  .bar { height:6px; background:#eee; border-radius:3px; overflow:hidden; margin:6px 0; display:none; }
+  .bar > div { height:100%; width:0; background:var(--brand); transition:width .3s; }
+  #log { max-height:180px; overflow:auto; font-family:monospace; font-size:11px; white-space:pre-wrap; background:#fafafa; border:1px solid var(--line); padding:6px; border-radius:6px; display:none; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:8px; margin:8px 0; }
+  .card h4 { margin:0 0 6px; font-size:13px; }
+  .card pre { white-space:pre-wrap; font-family:Arial, sans-serif; font-size:12px; max-height:220px; overflow:auto; margin:0 0 6px; background:#fcfafb; padding:6px; border-radius:5px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:#f1e4ea; color:var(--brand); margin-right:4px; }
+  .warn { color:var(--warn); font-size:11px; } .ok { color:var(--ok); }
+</style>
+</head>
+<body>
+<h2>Shaadi Bells – Ads & Captions</h2>
+<div class="hint" style="margin-bottom:8px">Ad = 13 points, no emojis · Caption = emojis, phone, hashtags</div>
+
+<details open>
+  <summary>One-click</summary>
+  <div class="hint">Select rows in the sheet first (for Repair).</div>
+  <div class="btns">
+    <button id="repairQuick">🛠 Repair selected</button>
+    <button id="repairAI">🛠 Repair with AI</button>
+  </div>
+  <div class="btns">
+    <button id="genEmpty" class="primary">✍ Generate empty rows</button>
+  </div>
+</details>
+
+<details id="connBox">
+  <summary>🔑 Secret API key <span id="keyState" class="hint"></span></summary>
+  <label>AI provider</label>
+  <select id="provider">
+    <option value="gemini">Google Gemini</option>
+    <option value="openai">OpenAI</option>
+    <option value="anthropic">Anthropic Claude</option>
+  </select>
+  <label>Model <span class="hint">(blank = default)</span></label>
+  <input type="text" id="model" placeholder="">
+  <label>API key</label>
+  <input type="password" id="apiKey" placeholder="Paste key – saved to your Google account only">
+  <div class="btns"><button id="saveKey">Save key</button><button id="testConn">Test</button></div>
+</details>
+
+<details open>
+  <summary>What to write</summary>
+  <label>Generate</label>
+  <select id="generate">
+    <option value="both">Ad (13 points) + Instagram caption</option>
+    <option value="caption">Instagram caption only</option>
+    <option value="ads">Ad (13 points) only</option>
+  </select>
+  <label>Caption type</label>
+  <select id="captionType">
+    <option value="specific">Profile-specific (AI, personalised)</option>
+    <option value="generic">Generic (brand template, no AI)</option>
+    <option value="both">Both (specific + "Generic Caption" column)</option>
+  </select>
+  <label>Rows</label>
+  <select id="rows">
+    <option value="selected">Selected rows</option>
+    <option value="empty">All rows with an empty caption</option>
+    <option value="all">All profile rows</option>
+    <option value="range">Row range…</option>
+  </select>
+  <div class="row2" id="rangeBox" style="display:none">
+    <div><label>From row</label><input type="number" id="rangeFrom" min="2"></div>
+    <div><label>To row</label><input type="number" id="rangeTo" min="2"></div>
+  </div>
+  <div class="chk"><input type="checkbox" id="overwrite"><span>Overwrite cells that already have text</span></div>
+</details>
+
+<details open>
+  <summary>Style</summary>
+  <label>Voice</label>
+  <select id="voice">
+    <option value="third">Third person – "He/She is…" (recommended)</option>
+    <option value="parent">Parents' voice – "Our son/daughter…"</option>
+    <option value="first">First person – "I am…"</option>
+  </select>
+  <label>Tone</label>
+  <select id="tone">
+    <option value="warm">Warm & conversational</option>
+    <option value="premium">Premium & elegant (HNI/NRI)</option>
+    <option value="concise">Concise & factual</option>
+  </select>
+  <div class="row2">
+    <div><label>Length</label>
+      <select id="length"><option value="short">Short</option><option value="standard">Standard</option><option value="long">Long</option></select></div>
+    <div><label>Hashtags (4+6+rest)</label><input type="number" id="hashtagCount" min="8" max="30"></div>
+  </div>
+  <label>Creativity <span id="tempVal" class="hint"></span></label>
+  <input type="range" id="temperature" min="0" max="1.2" step="0.1" style="width:100%">
+  <div class="chk"><input type="checkbox" id="emojis"><span>Caption emojis (💖 ✨ 💌 📞) – the ad never has emojis</span></div>
+</details>
+
+<details>
+  <summary>Data & checks</summary>
+  <label>Gender when the sheet doesn't say</label>
+  <select id="defaultGender">
+    <option value="auto">Auto (ID label → section heading → Male)</option>
+    <option value="M">Male</option>
+    <option value="F">Female</option>
+  </select>
+  <div class="hint">Auto reads "Boy -/Girl -" in the ID or the nearest "… Boys/Girls" heading row above.</div>
+  <div class="chk"><input type="checkbox" id="cleanData"><span>Clean data in text (spellings, heights, "X or Y" education)</span></div>
+  <div class="chk"><input type="checkbox" id="writeQA"><span>Write QA Notes column</span></div>
+  <div class="chk"><input type="checkbox" id="writeGender"><span>Write detected Gender column</span></div>
+  <label>Reference style rows</label>
+  <div class="row2">
+    <div><input type="number" id="refFrom" min="2"></div>
+    <div><input type="number" id="refTo" min="2"></div>
+  </div>
+  <div class="btns"><button id="refreshRef">Reload reference style</button></div>
+</details>
+
+<details open>
+  <summary>Options for the active row</summary>
+  <div class="row2">
+    <div><label>AI options</label>
+      <select id="variants"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></div>
+    <div style="display:flex;align-items:flex-end"><button id="previewBtn" style="width:100%">Show options</button></div>
+  </div>
+  <div class="hint">Click any cell in a profile row first. Pick one to write it.</div>
+  <div id="preview"></div>
+</details>
+
+<div class="btns">
+  <button id="runBtn" class="primary">Generate</button>
+  <button id="stopBtn" disabled>Stop</button>
+</div>
+<div class="bar" id="bar"><div></div></div>
+<div id="status"></div>
+<div id="log"></div>
+
+<script>
+  var FIELDS = ['provider','model','generate','captionType','rows','rangeFrom','rangeTo','overwrite','voice','tone','length',
+                'hashtagCount','temperature','emojis','defaultGender','cleanData','writeQA','writeGender','refFrom','refTo','variants'];
+  var defaults = {}, keys = {}, stopFlag = false;
+  function $(id){ return document.getElementById(id); }
+  function status(msg, cls){ $('status').innerHTML = '<span class="'+(cls||'')+'">'+msg+'</span>'; }
+  function log(lines){ var l=$('log'); l.style.display='block'; l.textContent += [].concat(lines).join('\n') + '\n'; l.scrollTop = l.scrollHeight; }
+  function esc(s){ return String(s).replace(/[&<>]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
+
+  function readOpts(){
+    var o = {};
+    FIELDS.forEach(function(f){ var el=$(f); o[f] = el.type==='checkbox' ? el.checked : (el.type==='number'||el.type==='range' ? Number(el.value) : el.value); });
+    return o;
+  }
+  function fill(o){
+    FIELDS.forEach(function(f){ var el=$(f); if(!el || o[f]===undefined) return; if(el.type==='checkbox') el.checked=!!o[f]; else el.value=o[f]; });
+    $('rangeBox').style.display = o.rows==='range' ? 'flex' : 'none';
+    $('tempVal').textContent = '(' + $('temperature').value + ')';
+    updateProviderUi();
+  }
+  function updateProviderUi(){
+    var p = $('provider').value;
+    $('model').placeholder = defaults[p] || '';
+    $('keyState').innerHTML = keys[p] ? '<span class="ok">● key saved</span>' : '<span class="warn">● no key</span>';
+    if(!keys[p] && $('captionType').value!=='generic') $('connBox').open = true;
+  }
+  function busy(on){ ['runBtn','previewBtn','saveKey','testConn','refreshRef','repairQuick','repairAI','genEmpty'].forEach(function(id){ $(id).disabled=on; }); $('stopBtn').disabled=!on; }
+  function fail(e){ busy(false); status('⚠ ' + esc(e.message || e), 'warn'); }
+
+  $('rows').onchange = function(){ $('rangeBox').style.display = this.value==='range' ? 'flex' : 'none'; };
+  $('provider').onchange = updateProviderUi;
+  $('captionType').onchange = updateProviderUi;
+  $('temperature').oninput = function(){ $('tempVal').textContent='('+this.value+')'; };
+
+  $('saveKey').onclick = function(){
+    var k=$('apiKey').value.trim(); if(!k){ status('Paste a key first','warn'); return; }
+    google.script.run.withSuccessHandler(function(){ keys[$('provider').value]=true; $('apiKey').value=''; updateProviderUi(); status('Key saved ✓','ok'); })
+      .withFailureHandler(fail).saveApiKey($('provider').value, k);
+  };
+  $('testConn').onclick = function(){
+    busy(true); status('Testing…');
+    google.script.run.withSuccessHandler(function(m){ busy(false); status(esc(m),'ok'); }).withFailureHandler(fail).testConnection(readOpts());
+  };
+  $('refreshRef').onclick = function(){
+    busy(true); status('Reading reference rows…');
+    google.script.run.withSuccessHandler(function(n){ busy(false); status(n + ' clean reference examples loaded ✓','ok'); }).withFailureHandler(fail).refreshReference(readOpts());
+  };
+
+  // ── Preview / pick an option ──
+  var lastPreview = null;
+  $('previewBtn').onclick = function(){
+    busy(true); status('Writing options…'); $('preview').innerHTML='';
+    google.script.run.withSuccessHandler(function(r){
+      busy(false); lastPreview = r;
+      var h = '<div class="hint" style="margin-top:6px">'+esc(r.id)+' · row '+r.row+' · <span class="pill">'+r.gender+'</span><span class="pill">'+esc(r.community)+'</span></div>';
+      if(r.qa.length) h += '<div class="warn">QA: '+esc(r.qa.join('; '))+'</div>';
+      r.options.forEach(function(o,i){
+        h += '<div class="card"><h4>'+(i+1)+'. '+esc(o.label)+'</h4>' +
+             (o.issues.length ? '<div class="warn">'+esc(o.issues.join('; '))+'</div>' : '') +
+             '<pre>'+esc(o.caption)+'</pre>' +
+             '<div class="btns"><button data-i="'+i+'" data-w="caption">Use caption</button><button data-i="'+i+'" data-w="both">Caption + ad</button></div></div>';
+      });
+      $('preview').innerHTML = h; status('Pick an option below','ok');
+    }).withFailureHandler(fail).previewActiveRow(readOpts());
+  };
+  $('preview').onclick = function(e){
+    var b = e.target.closest('button'); if(!b || !lastPreview) return;
+    var o = lastPreview.options[Number(b.dataset.i)];
+    b.disabled = true;
+    google.script.run.withSuccessHandler(function(m){ status(esc(m)+' ✓','ok'); b.textContent='Written ✓'; })
+      .withFailureHandler(fail).applyOption(lastPreview.row, o.caption, o.ads, b.dataset.w);
+  };
+
+  // ── Batch run (client-driven so it never hits the 6-minute limit) ──
+  function loop(rows, size, call){
+    var total = rows.length, done = 0;
+    if(!total){ busy(false); status('No matching profile rows.','warn'); return; }
+    $('bar').style.display='block';
+    (function next(){
+      if(stopFlag || !rows.length){ busy(false); status((stopFlag?'Stopped – ':'Done – ')+done+' of '+total+' rows','ok'); return; }
+      var chunk = rows.splice(0, size);
+      call(chunk, function(lines){
+        done += chunk.length; log(lines);
+        $('bar').firstElementChild.style.width = Math.round(done/total*100)+'%';
+        status('Working… '+done+' / '+total); next();
+      });
+    })();
+  }
+  function repair(useAI){
+    stopFlag = false; busy(true); $('log').textContent=''; status('Reading selection…');
+    var opts = readOpts();
+    google.script.run.withSuccessHandler(function(plan){
+      loop(plan.rows, useAI ? 3 : 25, function(chunk, ok){
+        google.script.run.withSuccessHandler(ok).withFailureHandler(fail).runRepairBatch(opts, chunk, useAI);
+      });
+    }).withFailureHandler(fail).planSelected(opts);
+  }
+  $('repairQuick').onclick = function(){ repair(false); };
+  $('repairAI').onclick = function(){ repair(true); };
+  $('genEmpty').onclick = function(){ $('rows').value='empty'; $('overwrite').checked=false; $('runBtn').click(); };
+
+  $('runBtn').onclick = function(){
+    stopFlag = false; busy(true); $('log').textContent=''; status('Finding rows…');
+    var opts = readOpts();
+    google.script.run.withSuccessHandler(function(plan){
+      var rows = plan.rows, total = rows.length, done = 0, size = opts.captionType==='generic' ? 25 : 3;
+      if(!total){ busy(false); status('No matching profile rows (tip: tick "Overwrite" or change Rows).','warn'); return; }
+      $('bar').style.display='block';
+      (function next(){
+        if(stopFlag || !rows.length){ busy(false); status((stopFlag?'Stopped – ':'Done – ')+done+' of '+total+' rows','ok'); return; }
+        var chunk = rows.splice(0, size);
+        google.script.run.withSuccessHandler(function(lines){
+          done += chunk.length; log(lines);
+          $('bar').firstElementChild.style.width = Math.round(done/total*100)+'%';
+          status('Working… '+done+' / '+total); next();
+        }).withFailureHandler(fail).runBatch(opts, chunk);
+      })();
+    }).withFailureHandler(fail).planRun(opts);
+  };
+  $('stopBtn').onclick = function(){ stopFlag = true; status('Stopping after this batch…'); };
+
+  google.script.run.withSuccessHandler(function(s){
+    defaults = s.defaultModels; keys = s.keys; fill(s.opts);
+    status('Sheet: '+esc(s.sheet)+' · active row '+s.activeRow);
+  }).withFailureHandler(fail).getPanelState();
+</script>
+</body>
+</html>
