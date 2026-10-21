@@ -33,7 +33,7 @@ var BRAND = {
 };
 
 var DEFAULT_OPTS = {
-  provider: 'gemini',            // gemini | openai | anthropic
+  provider: 'openai',            // openai | gemini | anthropic
   model: '',                     // blank = provider default
   generate: 'both',              // both | caption | ads
   captionType: 'specific',       // specific | generic | both
@@ -55,12 +55,12 @@ var DEFAULT_OPTS = {
   refTo: 101,
   variants: 3,
   repairAI: false,
-  sheetName: ''                  // blank = active sheet
+  sheetName: 'Sheet1'            // blank = active sheet
 };
 
 var DEFAULT_MODELS = {
   gemini: 'gemini-2.5-flash',
-  openai: 'gpt-4.1-mini',
+  openai: 'gpt-4o',
   anthropic: 'claude-sonnet-4-5'
 };
 
@@ -98,6 +98,7 @@ function onOpen() {
     .addItem('✍ Generate empty rows (AI)', 'menuGenerateEmptyAI')
     .addItem('✍ Generate empty rows (no AI, template)', 'menuGenerateEmptyGeneric')
     .addItem('♻ Regenerate selected rows (AI, overwrite)', 'menuRegenerateSelected')
+    .addItem('⏹ Stop background run', 'menuStopBackground')
     .addSeparator()
     .addItem('✅ QA check selected rows', 'menuQASelected')
     .addItem('⚙ Open settings panel', 'showSidebar')
@@ -139,27 +140,67 @@ function menuSetApiKey() {
 function runMenuJob_(over, mode) {
   var o = getOptions();
   for (var k in over) o[k] = over[k];
-  var started = Date.now();
-  var ctx = getContext_(o);
-  var rows = targetRows_(ctx);
-  if (!rows.length) { SpreadsheetApp.getActive().toast('No matching rows.', 'Shaadi Bells AI', 5); return; }
-  var done = 0, problems = 0;
-  for (var i = 0; i < rows.length; i++) {
-    if (Date.now() - started > 300000) break;            // Apps Script 6-min limit
-    try {
-      var msg = mode === 'repair' ? repairRow_(ctx, rows[i]) : processRow_(ctx, rows[i]);
-      if (/⚠|ERROR/.test(msg)) problems++;
-    } catch (e) {
-      if (/API key|error 40[13]/.test(String(e.message))) { SpreadsheetApp.getUi().alert(e.message); return; }
-      problems++;
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) { notify_('Another run is already in progress – try again in a minute.'); return; }
+  try {
+    var started = Date.now();
+    var ctx = getContext_(o);
+    var rows = targetRows_(ctx);
+    if (!rows.length) { clearContinuation_(); notify_('No matching rows.'); return; }
+    var done = 0, problems = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (Date.now() - started > 270000) break;                    // stay inside the 6-min limit
+      try {
+        var msg = mode === 'repair' ? repairRow_(ctx, rows[i]) : processRow_(ctx, rows[i]);
+        if (/⚠|ERROR/.test(msg)) problems++;
+      } catch (e) {
+        if (/API key|error 40[13]/.test(String(e.message))) { clearContinuation_(); notify_(e.message, true); return; }
+        problems++;
+      }
+      done++;
+      if (done % 5 === 0) notify_(done + ' / ' + rows.length + ' rows…');
     }
-    done++;
-    if (done % 5 === 0) SpreadsheetApp.getActive().toast(done + ' / ' + rows.length + ' rows…', 'Shaadi Bells AI', 3);
+    SpreadsheetApp.flush();
+    var more = done < rows.length;
+    // "Generate empty rows" continues by itself in the background (like the original script).
+    if (more && o.rows === 'empty') scheduleContinuation_(over); else if (o.rows === 'empty') clearContinuation_();
+    notify_(done + ' of ' + rows.length + ' rows done' + (problems ? ' · ' + problems + ' need a look (see QA Notes)' : '') +
+      (more ? (o.rows === 'empty' ? ' · continuing automatically in 1 minute' : ' · time limit – click again to continue') : ''));
+  } finally {
+    lock.releaseLock();
   }
-  SpreadsheetApp.flush();
-  SpreadsheetApp.getActive().toast(done + ' of ' + rows.length + ' rows done' + (problems ? ' · ' + problems + ' need a look (see QA Notes)' : '') +
-    (done < rows.length ? ' · time limit reached – click the same menu item again to continue' : ''), 'Shaadi Bells AI', 10);
 }
+
+function notify_(msg, alert) {
+  try {
+    if (alert) SpreadsheetApp.getUi().alert(msg);
+    else SpreadsheetApp.getActive().toast(msg, 'Shaadi Bells AI', 8);
+  } catch (e) { console.log(msg); }   // no UI when running from a trigger
+}
+
+function scheduleContinuation_(over) {
+  clearContinuation_();
+  PropertiesService.getDocumentProperties().setProperty('sb_continue', JSON.stringify(over || {}));
+  ScriptApp.newTrigger('continueGenerateEmpty_').timeBased().after(60 * 1000).create();
+}
+
+function clearContinuation_() {
+  try {
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      var h = t.getHandlerFunction();
+      if (h === 'continueGenerateEmpty_' || h === 'generateInstagramForEmptyColumnO') ScriptApp.deleteTrigger(t);
+    });
+  } catch (e) {}
+}
+
+/** Trigger handler – resumes "Generate empty rows". */
+function continueGenerateEmpty_() {
+  var saved = PropertiesService.getDocumentProperties().getProperty('sb_continue');
+  runMenuJob_(saved ? JSON.parse(saved) : { rows: 'empty', generate: 'both', captionType: 'specific', overwrite: false });
+}
+
+/** Stops any background continuation. */
+function menuStopBackground() { clearContinuation_(); notify_('Background run stopped.'); }
 
 function menuRepairQuick() { runMenuJob_({ rows: 'selected', repairAI: false }, 'repair'); }
 function menuRepairAI() { runMenuJob_({ rows: 'selected', repairAI: true }, 'repair'); }
@@ -317,15 +358,50 @@ function countIds_(colA) {
   return c;
 }
 
-function readProfile_(ctx, row) {
+var AD_LABELS = { dob: 'Date of Birth', place: '(?:Residence|Birth Place|Place of Residence)', height: 'Height', caste: 'Caste',
+  education: 'Education', schooling: 'Schooling', college: 'College / University', occupation: 'Occupation / Job',
+  father: 'Father', mother: 'Mother', hobbies: 'Hobbies / Interests' };
+
+/** Value of "N. Label: value" in an existing ad (the old script's primary source). */
+function adField_(ads, field) {
+  var re = new RegExp('^\\s*\\d+\\.\\s*' + AD_LABELS[field] + '\\s*:\\s*(.+)$', 'im');
+  var m = String(ads || '').match(re);
+  var v = m ? m[1].trim() : '';
+  return /^(—|-|n\/a|date of birth|residence|height|caste)$/i.test(v) ? '' : v;
+}
+
+/** Profile rows without an ID get the next SM number (like the original script). */
+function nextId_(ctx) {
+  if (!ctx.maxId) {
+    var max = 196366;                                   // first generated ID = SM196367
+    Object.keys(ctx.idCounts).forEach(function (k) { var n = parseInt(k.slice(2), 10); if (n > max) max = n; });
+    ctx.maxId = max;
+  }
+  ctx.maxId++;
+  return 'SM' + ctx.maxId;
+}
+
+function profileFieldCount_(get) {
+  return ['dob', 'place', 'education', 'occupation', 'father', 'mother', 'hobbies', 'college']
+    .filter(function (f) { return get(f); }).length;
+}
+
+function readProfile_(ctx, row, assignId) {
   var sh = ctx.sheet, lastCol = sh.getLastColumn();
   var vals = sh.getRange(row, 1, 1, lastCol).getDisplayValues()[0];
   var get = function (f) { return ctx.cols[f] ? String(vals[ctx.cols[f] - 1] || '').trim() : ''; };
   var rawId = get('id');
   var m = rawId.match(/SM\d+/i);
-  if (!m) return null;                                  // header / section / blank row
+  var id = m ? m[0].toUpperCase() : '';
+  if (!m) {
+    if (rawId || profileFieldCount_(get) < 3) return null;   // header / section / blank row
+    if (!assignId) return null;
+    id = nextId_(ctx);
+    sh.getRange(row, ctx.cols.id).setValue(id);
+    rawId = id; ctx.idCounts[id] = 1;
+  }
   var p = {
-    row: row, rawId: rawId, id: m[0].toUpperCase(),
+    row: row, rawId: rawId, id: id,
     dob: get('dob'), place: get('place'), height: get('height'), caste: get('caste'),
     education: get('education'), schooling: get('schooling'), college: get('college'),
     occupation: get('occupation'), background: get('background'), father: get('father'),
@@ -333,10 +409,12 @@ function readProfile_(ctx, row) {
     existingAds: get('ads'), existingCaption: get('caption'), genderCell: get('gender'),
     section: ctx.sections[row - 1] || ''
   };
+  Object.keys(AD_LABELS).forEach(function (f) { if (!p[f]) p[f] = adField_(p.existingAds, f); });
   p.gender = detectGender_(p, ctx.opts.defaultGender);
   p.notes = [];
   if (ctx.opts.cleanData) cleanProfile_(p);
   p.community = communityOf_(p.caste);
+  p.category = categoryOf_(p);
   return p;
 }
 
@@ -464,7 +542,7 @@ function surnameOf_(caste) {
 
 // ────────────────────────────── Hashtags ───────────────────────────────────
 function camelTag_(s) {
-  var words = String(s || '').replace(/[’'`]/g, '').replace(/&/g, ' and ')
+  var words = String(s || '').replace(/[’'\x60]/g, '').replace(/&/g, ' and ')
     .split(/[^A-Za-z0-9]+/).filter(String);
   if (!words.length) return '';
   var t = words.map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join('');
@@ -481,9 +559,10 @@ function placeTags_(place) {
   if (/amritsar|ludhiana|jalandhar|patiala|bathinda|punjab|moga|barnala|faridkot|ferozepur|gurdaspur|hoshiarpur|kapurthala|mansa|pathankot|rupnagar|sangrur|fazilka|muktsar|fatehgarh/.test(p)) t.push('#PunjabiMatrimony');
   if (/uae|dubai|abu dhabi|sharjah/.test(p)) t.push('#NRIMatrimony', '#IndianMatrimonyServicesInDubai');
   if (/canada|ontario|toronto|brampton|alberta|vancouver|british columbia/.test(p)) t.push('#NRIMatrimony', '#CanadaMatrimony');
-  if (/\buk\b|london|england|birmingham/.test(p)) t.push('#NRIMatrimony', '#UKMatrimony');
-  if (/\busa\b|united states|new york|new jersey|california|texas/.test(p)) t.push('#NRIMatrimony', '#USAMatrimony');
+  if (/\buk\b|london|england|birmingham|bradford|leeds|leicester|manchester|wolverhampton|coventry|southall|slough|glasgow|edinburgh|scotland|wales/.test(p)) t.push('#NRIMatrimony', '#UKMatrimony');
+  if (/\busa\b|united states|new york|new jersey|california|texas|chicago|seattle|boston|houston|san francisco/.test(p)) t.push('#NRIMatrimony', '#USAMatrimony');
   if (/australia|sydney|melbourne/.test(p)) t.push('#NRIMatrimony', '#AustraliaMatrimony');
+  if (/singapore|new zealand|auckland|germany|hong kong|kenya|nairobi|qatar|doha|oman|muscat|kuwait|bahrain|saudi/.test(p)) t.push('#NRIMatrimony');
   return t;
 }
 
@@ -511,33 +590,106 @@ function professionTags_(p) {
 
 var BLOCKED_TAG = /customhashtag|placeofresidence|hashtag\d|example/i;
 
+// Approved SEO hashtags (from the original Shaadi Bells script). SEO slots use ONLY these.
+var APPROVED_SEO = ['#HighProfileMatrimonyInMumbai', '#MatrimonyInIndia', '#BrahminMatrimonyInDelhi', '#EliteMatrimonyServicesInDelhi',
+  '#AgarwalMatrimonyInDelhi', '#PunjabiMatrimonyInDelhi', '#JainMatrimonyInDelhi', '#DivorceMatrimony', '#DivorceeMatrimony',
+  '#DivorceeMatrimonyInDelhi', '#BestMatrimonyInMumbai', '#SindhiMatrimonyInMumbai', '#JainMatrimonyInMumbai', '#MarwadiMatrimonyInMumbai',
+  '#PremiumMatrimonyServices', '#MatrimonyServices', '#BestMatrimonyServicesInIndia', '#MatrimonyServicesInGurgaon',
+  '#MatrimonyServicesInFaridabad', '#MatrimonyServicesInNoida', '#NRIMatrimony', '#MatrimonyServicesForBaniyaCommunity',
+  '#MaheshwariMatrimonyServices', '#DigambarJainMatrimony', '#RajputMatrimony', '#HighProfileMatrimony', '#SecondMarriageMatrimony',
+  '#MarwariMatrimonyServices', '#ShwetambarJainMatrimony', '#HumadJainMatrimony', '#OswalJainMatrimony', '#HNIMatrimonyServices',
+  '#SikhMatrimonyServices', '#SindhiMatrimonyServices', '#DoctorMatrimony', '#PoliticiansMatrimonyServices', '#IASIPSMatrimony',
+  '#RemarriageMatrimonyServices', '#BusinessFamilyMatrimony', '#IndianMatrimonyServicesInDubai', '#EliteMatrimonyDubai',
+  '#PremiumMatrimonyInIndia', '#PremiumMatrimonyInDubai', '#PremiumMatrimonyInCanada', '#PremiumMatrimonyInAustralia',
+  '#BillionaireMatrimony', '#MillionaireMatrimony', '#BillionaireMatrimonyInDubai'];
+var SEO_FILLERS = ['#PremiumMatrimonyServices', '#HighProfileMatrimony', '#HNIMatrimonyServices', '#BestMatrimonyServicesInIndia',
+  '#PremiumMatrimonyInIndia', '#MatrimonyInIndia', '#MatrimonyServices'];
+var CUSTOM_FILLERS = ['#MatrimonialProfile', '#ShaadiJourney', '#IndianMatrimony', '#FamilyValues', '#LifePartnerSearch',
+  '#MeaningfulConnections', '#PerfectMatch', '#RishtaAlert'];
+
+function isApproved_(t) {
+  var k = String(t).toLowerCase();
+  return APPROVED_SEO.some(function (a) { return a.toLowerCase() === k; }) ||
+    BRAND.baseTags.some(function (a) { return a.toLowerCase() === k; });
+}
+
+/** ["Divorce"|"Remarriage", "NRI"] – used for tags and the prompt. */
+function categoryOf_(p) {
+  var t = (p.rawId + ' ' + p.section + ' ' + p.place + ' ' + p.background).toLowerCase();
+  var c = [];
+  if (/divorc|second marriage/.test(t)) c.push('Divorce');
+  else if (/remarri|re-marri/.test(t)) c.push('Remarriage');
+  if (placeTags_(p.place).indexOf('#NRIMatrimony') > -1 || /\bnri\b|overseas|abroad/.test(t)) c.push('NRI');
+  return c;
+}
+
+/** Ordered list of relevant approved SEO tags for this profile. */
+function seoTags_(p) {
+  var place = String(p.place || '').toLowerCase();
+  var caste = (p.caste + ' ' + p.community).toLowerCase();
+  var job = (p.occupation + ' ' + p.education).toLowerCase();
+  var fam = (p.father + ' ' + p.mother).toLowerCase();
+  var delhi = /delhi|ncr/.test(place), mumbai = /mumbai|bombay|juhu|bandra|worli|powai|colaba|malabar/.test(place);
+  var t = [], cat = p.category || [];
+  if (cat.indexOf('Divorce') > -1) t.push(delhi ? '#DivorceeMatrimonyInDelhi' : '#DivorceeMatrimony', '#SecondMarriageMatrimony', '#DivorceMatrimony');
+  if (cat.indexOf('Remarriage') > -1) t.push('#RemarriageMatrimonyServices', '#SecondMarriageMatrimony');
+  if (/dubai|uae|abu dhabi|sharjah/.test(place)) t.push('#IndianMatrimonyServicesInDubai', '#EliteMatrimonyDubai', '#PremiumMatrimonyInDubai');
+  if (/canada|ontario|toronto|brampton|alberta|vancouver/.test(place)) t.push('#PremiumMatrimonyInCanada');
+  if (/australia|sydney|melbourne/.test(place)) t.push('#PremiumMatrimonyInAustralia');
+  if (cat.indexOf('NRI') > -1) t.push('#NRIMatrimony');
+  if (/digambar/.test(caste)) t.push('#DigambarJainMatrimony');
+  if (/shwetambar|svetambar/.test(caste)) t.push('#ShwetambarJainMatrimony');
+  if (/oswal/.test(caste)) t.push('#OswalJainMatrimony');
+  if (/humad/.test(caste)) t.push('#HumadJainMatrimony');
+  if (p.community === 'Jain') t.push(mumbai ? '#JainMatrimonyInMumbai' : '#JainMatrimonyInDelhi');
+  if (p.community === 'Agarwal') { if (delhi) t.push('#AgarwalMatrimonyInDelhi'); t.push('#MatrimonyServicesForBaniyaCommunity'); }
+  if (p.community === 'Jatt' && !/jakhar|dahiya|hooda|malik|sangwan|jat\(/.test(caste)) t.push('#SikhMatrimonyServices');
+  if ((p.community === 'Jatt' || p.community === 'Khatri') && delhi) t.push('#PunjabiMatrimonyInDelhi');
+  if (/maheshwari/.test(caste)) t.push('#MaheshwariMatrimonyServices');
+  if (/marwa(r|d)i/.test(caste)) t.push(mumbai ? '#MarwadiMatrimonyInMumbai' : '#MarwariMatrimonyServices');
+  if (/sindhi/.test(caste)) t.push(mumbai ? '#SindhiMatrimonyInMumbai' : '#SindhiMatrimonyServices');
+  if (/rajput/.test(caste)) t.push('#RajputMatrimony');
+  if (/brahmin|sharma|tiwari|mishra|pandit/.test(caste) && delhi) t.push('#BrahminMatrimonyInDelhi');
+  if (/doctor|surgeon|mbbs|\bmd\b|physician|cardio|ologist|dent/.test(job)) t.push('#DoctorMatrimony');
+  if (/\bias\b|\bips\b|\bifs\b/.test(job + ' ' + fam)) t.push('#IASIPSMatrimony');
+  if (/politic|\bmla\b|\bmp\b|minister/.test(job + ' ' + fam)) t.push('#PoliticiansMatrimonyServices');
+  if (/business|entrepreneur|founder|industrialist|industrial house/.test(job + ' ' + fam)) t.push('#BusinessFamilyMatrimony');
+  if (mumbai) t.push('#HighProfileMatrimonyInMumbai', '#BestMatrimonyInMumbai');
+  if (delhi) t.push('#EliteMatrimonyServicesInDelhi');
+  if (/gurugram|gurgaon/.test(place)) t.push('#MatrimonyServicesInGurgaon');
+  if (/noida/.test(place)) t.push('#MatrimonyServicesInNoida');
+  if (/faridabad/.test(place)) t.push('#MatrimonyServicesInFaridabad');
+  return t;
+}
+
+/** 4 brand + 6 approved SEO + the rest profile-specific (default total 18). */
 function buildHashtags_(p, aiTags, limit) {
-  var seen = {}, out = [];
-  function add(t) {
-    t = String(t || '').trim();
-    if (!t) return;
-    if (t.charAt(0) !== '#') t = '#' + t;
-    t = '#' + t.slice(1).replace(/[^A-Za-z0-9_]/g, '');
-    if (t.length < 4 || t.length > 41 || BLOCKED_TAG.test(t)) return;
-    var k = t.toLowerCase();
-    if (seen[k]) return;
-    seen[k] = 1; out.push(t);
+  limit = Math.max(12, Number(limit) || 18);
+  var seen = {}, core = [], seo = [], custom = [];
+  function norm(t) {
+    t = String(t || '').trim(); if (!t) return '';
+    t = '#' + t.replace(/^#+/, '').replace(/[^A-Za-z0-9_]/g, '');
+    return (t.length < 4 || t.length > 31 || BLOCKED_TAG.test(t)) ? '' : t;
   }
-  BRAND.baseTags.forEach(add);
-  communityTags_(p.community).forEach(add);
-  placeTags_(p.place).forEach(add);
-  professionTags_(p).forEach(add);
-  BRAND.premiumTags.forEach(add);
-  // AI tags are filtered so they can't contradict the profile's community/place.
-  (aiTags || []).filter(function (t) {
-    var k = ('#' + String(t).replace(/^#/, '')).toLowerCase();
-    return !seen[k] && tagFitsProfile_(t, p);
-  }).slice(0, 6).forEach(add);
-  add(camelTag_(p.college));
-  add(camelTag_(p.schooling));
+  function push(list, t, max) {
+    t = norm(t); if (!t || list.length >= max) return;
+    var k = t.toLowerCase(); if (seen[k]) return; seen[k] = 1; list.push(t);
+  }
+  BRAND.baseTags.forEach(function (t) { push(core, t, 4); });
+  seoTags_(p).forEach(function (t) { push(seo, t, 6); });
+  var nri = (p.category || []).indexOf('NRI') > -1;
+  SEO_FILLERS.forEach(function (t) { if (!(nri && /InIndia$/.test(t))) push(seo, t, 6); });
+  var nCustom = limit - 10;
+  (aiTags || []).filter(function (t) { return !isApproved_(norm(t)) && tagFitsProfile_(t, p); })
+    .slice(0, 4).forEach(function (t) { push(custom, t, nCustom); });
+  push(custom, camelTag_(p.college), nCustom);
+  push(custom, camelTag_(p.schooling), nCustom);
   var hob = String(p.hobbies || '').split(/,|\//)[0];
-  if (hob) add(camelTag_(hob + ' lovers'));
-  return out.slice(0, limit);
+  if (hob) push(custom, camelTag_(hob + ' lovers'), nCustom);
+  var city = String(p.place || '').split(',').pop().trim();
+  if (city) push(custom, camelTag_(city + ' profiles'), nCustom);
+  CUSTOM_FILLERS.forEach(function (t) { push(custom, t, nCustom); });
+  return core.concat(seo, custom);
 }
 
 var COMMUNITY_WORDS = /(brahmin|sindhi|rajput|jain|agarwal|aggarwal|baniya|khatri|jatt?|sikh|marwari|gujarati|bengali|tamil|telugu|maratha|muslim|christian|kayastha|arora)/i;
@@ -833,6 +985,9 @@ function buildPrompt_(p, refs, opts, n, extra) {
     'REFERENCE EXAMPLES (style only – voice may differ from what is required):', ex || '(none)',
     '', 'PROFILE:', JSON.stringify(profileForPrompt_(p), null, 1),
     '', voiceRules_(p, opts.voice), TONE[opts.tone] || TONE.warm, LENGTH[opts.length] || LENGTH.standard,
+    (p.category || []).indexOf('Divorce') > -1 || (p.category || []).indexOf('Remarriage') > -1
+      ? 'Second-marriage profile: frame Seeking around a fresh start / new chapter, warmly and respectfully. Never discuss the previous marriage.' : '',
+    (p.category || []).indexOf('NRI') > -1 ? 'NRI profile: mention the life abroad naturally (city/country from the profile).' : '',
     extra ? '\nFIX THESE PROBLEMS FROM YOUR LAST ATTEMPT: ' + extra : '',
     '', schema
   ].join('\n');
@@ -912,7 +1067,7 @@ function callLLM_(opts, system, user, temperature, seed) {
 function seedFor_(id) { return hashIdx_(String(id), 2147483); }
 
 function parseJsonLoose_(text) {
-  text = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  text = String(text || '').trim().replace(/^\x60{3}(?:json)?/i, '').replace(/\x60{3}$/, '').trim();
   try { return JSON.parse(text); } catch (e) {}
   var a = text.indexOf('{'), b = text.lastIndexOf('}');
   if (a > -1 && b > a) return JSON.parse(text.slice(a, b + 1));
@@ -954,7 +1109,7 @@ function writeCell_(ctx, row, field, value, force) {
 
 /** Processes one row. Returns a short status string for the panel log. */
 function processRow_(ctx, row) {
-  var p = readProfile_(ctx, row);
+  var p = readProfile_(ctx, row, true);
   if (!p) return 'Row ' + row + ': skipped (not a profile row)';
   var o = ctx.opts;
   var qa = qaCheck_(p, ctx);
@@ -1002,8 +1157,13 @@ function targetRows_(ctx) {
   var caps = sh.getRange(from, ctx.cols.caption, n, 1).getDisplayValues();
   var ads = sh.getRange(from, ctx.cols.ads, n, 1).getDisplayValues();
   var out = [];
+  var block = sh.getRange(from, 1, n, sh.getLastColumn()).getDisplayValues();
   for (var i = 0; i < ids.length; i++) {
-    if (!/SM\d+/i.test(ids[i][0])) continue;
+    if (!/SM\d+/i.test(ids[i][0])) {
+      if (String(ids[i][0]).trim()) continue;                              // section / header label
+      var rowVals = block[i];
+      if (profileFieldCount_(function (f) { return ctx.cols[f] ? String(rowVals[ctx.cols[f] - 1] || '').trim() : ''; }) < 3) continue;
+    }
     if (o.rows === 'empty') {
       var capEmpty = !String(caps[i][0]).trim(), adEmpty = !String(ads[i][0]).trim();
       var need = o.generate === 'ads' ? adEmpty : o.generate === 'caption' ? capEmpty : (capEmpty || adEmpty);
@@ -1129,7 +1289,7 @@ function keepCase_(orig, repl) {
   return repl;
 }
 
-/** Cleans a sentence block; pushes what it fixed into `fixed`. */
+/** Cleans a sentence block; pushes what it fixed into 'fixed'. */
 function cleanText_(s, fixed) {
   var t = String(s || ''), before;
   before = t; t = stripEmoji_(t); if (t !== before) fixed.add('emojis removed from text');
