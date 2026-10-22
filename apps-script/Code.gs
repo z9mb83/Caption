@@ -558,11 +558,11 @@ function placeTags_(place) {
   if (/mumbai|bombay|juhu|bandra|worli|powai|colaba|malabar/.test(p)) t.push('#HighProfileMatrimonyInMumbai');
   if (/amritsar|ludhiana|jalandhar|patiala|bathinda|punjab|moga|barnala|faridkot|ferozepur|gurdaspur|hoshiarpur|kapurthala|mansa|pathankot|rupnagar|sangrur|fazilka|muktsar|fatehgarh/.test(p)) t.push('#PunjabiMatrimony');
   if (/uae|dubai|abu dhabi|sharjah/.test(p)) t.push('#NRIMatrimony', '#IndianMatrimonyServicesInDubai');
-  if (/canada|ontario|toronto|brampton|alberta|vancouver|british columbia/.test(p)) t.push('#NRIMatrimony', '#CanadaMatrimony');
-  if (/\buk\b|london|england|birmingham|bradford|leeds|leicester|manchester|wolverhampton|coventry|southall|slough|glasgow|edinburgh|scotland|wales/.test(p)) t.push('#NRIMatrimony', '#UKMatrimony');
-  if (/\busa\b|united states|new york|new jersey|california|texas|chicago|seattle|boston|houston|san francisco/.test(p)) t.push('#NRIMatrimony', '#USAMatrimony');
-  if (/australia|sydney|melbourne/.test(p)) t.push('#NRIMatrimony', '#AustraliaMatrimony');
-  if (/singapore|new zealand|auckland|germany|hong kong|kenya|nairobi|qatar|doha|oman|muscat|kuwait|bahrain|saudi/.test(p)) t.push('#NRIMatrimony');
+  if (/canada|ontario|toronto|brampton|alberta|vancouver|british columbia|mississauga|abbotsford|calgary|edmonton|winnipeg|montreal|surrey|ottawa|manitoba|quebec/.test(p)) t.push('#NRIMatrimony', '#CanadaMatrimony');
+  if (/\buk\b|london|england|birmingham|bradford|leeds|leicester|manchester|wolverhampton|coventry|southall|slough|glasgow|edinburgh|scotland|wales|gravesend|hounslow|essex/.test(p)) t.push('#NRIMatrimony', '#UKMatrimony');
+  if (/\busa\b|united states|new york|new jersey|california|texas|chicago|seattle|boston|houston|san francisco|\((nj|ca|ny|tx|wa|il|ma|ga|fl|va|md|pa|mi|nc|az)\)|jersey city|edison|yuba city|fremont|san jose|sacramento|fresno|bakersfield/.test(p)) t.push('#NRIMatrimony', '#USAMatrimony');
+  if (/australia|sydney|melbourne|brisbane|perth|adelaide/.test(p)) t.push('#NRIMatrimony', '#AustraliaMatrimony');
+  if (/singapore|new zealand|auckland|germany|hong kong|kenya|nairobi|qatar|doha|oman|muscat|kuwait|bahrain|saudi|manama|riyadh|jeddah|italy|milan|rome|brescia|latina|spain|barcelona|madrid|netherlands|rotterdam|amsterdam|france|paris|berlin|frankfurt/.test(p)) t.push('#NRIMatrimony');
   return t;
 }
 
@@ -634,8 +634,8 @@ function seoTags_(p) {
   if (cat.indexOf('Divorce') > -1) t.push(delhi ? '#DivorceeMatrimonyInDelhi' : '#DivorceeMatrimony', '#SecondMarriageMatrimony', '#DivorceMatrimony');
   if (cat.indexOf('Remarriage') > -1) t.push('#RemarriageMatrimonyServices', '#SecondMarriageMatrimony');
   if (/dubai|uae|abu dhabi|sharjah/.test(place)) t.push('#IndianMatrimonyServicesInDubai', '#EliteMatrimonyDubai', '#PremiumMatrimonyInDubai');
-  if (/canada|ontario|toronto|brampton|alberta|vancouver/.test(place)) t.push('#PremiumMatrimonyInCanada');
-  if (/australia|sydney|melbourne/.test(place)) t.push('#PremiumMatrimonyInAustralia');
+  if (/canada|ontario|toronto|brampton|alberta|vancouver|mississauga|abbotsford|calgary|edmonton|winnipeg|montreal|surrey|ottawa|manitoba|quebec/.test(place)) t.push('#PremiumMatrimonyInCanada');
+  if (/australia|sydney|melbourne|brisbane|perth|adelaide/.test(place)) t.push('#PremiumMatrimonyInAustralia');
   if (cat.indexOf('NRI') > -1) t.push('#NRIMatrimony');
   if (/digambar/.test(caste)) t.push('#DigambarJainMatrimony');
   if (/shwetambar|svetambar/.test(caste)) t.push('#ShwetambarJainMatrimony');
@@ -679,7 +679,7 @@ function buildHashtags_(p, aiTags, limit) {
   seoTags_(p).forEach(function (t) { push(seo, t, 6); });
   var nri = (p.category || []).indexOf('NRI') > -1;
   SEO_FILLERS.forEach(function (t) { if (!(nri && /InIndia$/.test(t))) push(seo, t, 6); });
-  var nCustom = limit - 10;
+  var nCustom = limit - core.length - seo.length;   // keeps the total at the limit even if fewer SEO tags fit
   (aiTags || []).filter(function (t) { return !isApproved_(norm(t)) && tagFitsProfile_(t, p); })
     .slice(0, 4).forEach(function (t) { push(custom, t, nCustom); });
   push(custom, camelTag_(p.college), nCustom);
