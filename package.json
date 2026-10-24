@@ -1,0 +1,11 @@
+{
+  "name": "shaadi-bells-ads-captions",
+  "version": "1.3.1",
+  "private": true,
+  "description": "Google Apps Script that writes and repairs Shaadi Bells matrimonial ads and Instagram captions",
+  "scripts": {
+    "test": "node tests/run.js",
+    "lint": "node --check apps-script/Code.gs 2>/dev/null || (cp apps-script/Code.gs /tmp/code_check.js && node --check /tmp/code_check.js)"
+  },
+  "engines": { "node": ">=16" }
+}

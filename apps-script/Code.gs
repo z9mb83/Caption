@@ -373,9 +373,8 @@ function adField_(ads, field) {
 /** Profile rows without an ID get the next SM number (like the original script). */
 function nextId_(ctx) {
   if (!ctx.maxId) {
-    var max = 196366;                                   // first generated ID = SM196367
-    Object.keys(ctx.idCounts).forEach(function (k) { var n = parseInt(k.slice(2), 10); if (n > max) max = n; });
-    ctx.maxId = max;
+    var nums = Object.keys(ctx.idCounts).map(function (k) { return parseInt(k.slice(2), 10); }).filter(isFinite);
+    ctx.maxId = nums.length ? Math.max.apply(null, nums) : 196366;   // empty sheet → first ID SM196367
   }
   ctx.maxId++;
   return 'SM' + ctx.maxId;

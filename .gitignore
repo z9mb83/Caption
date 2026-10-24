@@ -1,0 +1,10 @@
+# Sheet exports contain personal profile data – never commit them
+*.csv
+*.xlsx
+data/
+exports/
+# clasp
+.clasp.json
+.clasprc.json
+node_modules/
+.DS_Store
